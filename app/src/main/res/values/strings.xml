@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="accessibility_label">SimSwitch data-SIM switcher</string>
+
+    <!-- Shown to the user on the Settings → Accessibility consent screen, so it has to explain the
+         unusual ask honestly: this is not an assistive feature, it is the only remaining way to
+         move the data SIM on an unrooted phone away from Wi-Fi. -->
+    <string name="accessibility_description">Lets SimSwitch change your mobile data SIM by opening the SIM manager and tapping it for you.\n\nThis is the only mechanism that keeps working away from Wi-Fi. The privileged shortcut (Shizuku) is started by adb, and Android kills it the moment you leave the Wi-Fi network you enabled Wireless debugging on — which is exactly when a better network matters.\n\nSimSwitch only ever reads the SIM manager screen. It cannot see any other app.</string>
+
+</resources>

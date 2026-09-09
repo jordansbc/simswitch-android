@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Which app is in the foreground, so a switch doesn't open the SIM manager on top of Maps or a
+      text thread. Signature-level: declaring it only lists the app under Settings → Special access
+      → Usage data access, where the user grants it. See ForegroundApp.
+    -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <!--
+      Usage events are filtered by package visibility on Android 11+, so without this the foreground
+      app would silently read as "unknown" — which fails open and would quietly restore exactly the
+      behaviour this is meant to stop. Only ever used to compare the foreground package against the
+      launcher; no package list is stored or transmitted.
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+
+    <!-- Resolving the home launcher, which is the definition of "nothing in use". -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+    </queries>
+
+
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Cell identity, and therefore band numbers, is gated on location — not just phone state. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Places are learned while the phone is in a pocket, so collection must continue with the
+         screen off and the app in the background. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required by DeviceState to tell "on Wi-Fi, mobile idle" (a safe moment to switch)
+         from "screen on and actively using mobile data" (never switch). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <!--
+      Not for drawing anything. Holding "Display over other apps" is what grants an app the
+      background-activity-start privilege, and starting the SIM manager from the monitoring service
+      is a background activity start.
+
+      Without it Android silently drops the startActivity: no exception, no callback, the activity
+      simply never fronts. That is the whole of the residual failure mode on device — every switch
+      failure since awaitSimManagerWindow() landed reported "the SIM manager never came to the
+      foreground", and always after the full 15 s timeout rather than as a settling race.
+      See SwitchAccessibilityService.canStartActivityFromBackground.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:label="SimSwitch"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.SimSwitchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|location">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Continuous dual-SIM radio monitoring to select the faster mobile data network" />
+        </service>
+
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          The switch mechanism. Bound by the system only, gated on BIND_ACCESSIBILITY_SERVICE, and
+          scoped by packageNames in its config to the two telephony-settings packages.
+        -->
+        <service
+            android:name=".switching.SwitchAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/switch_accessibility_service" />
+        </service>
+    </application>
+</manifest>

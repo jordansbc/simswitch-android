@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  packageNames is deliberately narrow.
+
+  An accessibility service is the broadest permission on Android — unrestricted, it can read every
+  window on the device, including banking apps and password fields. Binding this service to the two
+  telephony-settings packages means the OS never hands it anything else: SimSwitch is structurally
+  incapable of reading another app, rather than merely choosing not to.
+
+  flagReportViewIds is load-bearing, not cosmetic. Without it getViewIdResourceName() returns null
+  for every node, which silently breaks both id-based checks in SwitchAccessibilityService: the
+  simName/plmn nickname lookup and the picker's android:id/text1 guard. Text matching keeps working,
+  so the flow still reaches the picker and only then fails — which reads like a label problem rather
+  than a config one. uiautomator sets this flag itself, so adb dumps show the ids perfectly while
+  the service sees none of them. That mismatch cost three wrong diagnoses on 2026-09-02.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_description"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100"
+    android:packageNames="com.samsung.android.app.telephonyui,com.android.settings" />

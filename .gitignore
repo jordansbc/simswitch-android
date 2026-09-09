@@ -1,0 +1,13 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.kotlin/
+
+# Compiled output of the Phase 0 probe (tools/ProbeMain.java) — regenerate with javac + d8.
+tools/out/
+
+# Derived from CoverageMap's crowdsourced dataset, which they sell access to. Regenerate in ~1 min
+# with `node tools/fetch_coverage_seed.mjs` rather than redistributing it. See HANDOFF.md.
+app/src/main/assets/coverage_seed.json
