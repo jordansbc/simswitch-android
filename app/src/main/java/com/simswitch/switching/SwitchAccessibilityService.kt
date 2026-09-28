@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.telephony.SubscriptionManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 
 /**
  * Mechanism B: move the data SIM by driving Samsung's SIM manager.
@@ -76,13 +77,7 @@ class SwitchAccessibilityService : AccessibilityService() {
         targetLabels: Set<String>,
         otherLabels: Set<String>,
     ): SimSwitcher.Result {
-        val opened = runCatching {
-            startActivity(
-                Intent(SIM_SETTINGS_ACTION)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            )
-        }
-        opened.exceptionOrNull()?.let {
+        openSimManager()?.let {
             return SimSwitcher.Result(false, "could not open the SIM manager: $it")
         }
 
@@ -102,7 +97,7 @@ class SwitchAccessibilityService : AccessibilityService() {
                             "'Display over other apps' is not granted, so Android is dropping the " +
                             "background activity start"
                     } else {
-                        "the SIM manager never came to the foreground"
+                        "the SIM manager never came to the foreground (windows: ${describeWindows()})"
                     },
                 )
             }
@@ -250,13 +245,70 @@ class SwitchAccessibilityService : AccessibilityService() {
      * and a timeout here is honestly reportable rather than silently degrading.
      */
     private fun awaitSimManagerWindow(): Boolean {
-        val deadline = SystemClock.uptimeMillis() + WINDOW_TIMEOUT_MS
+        val start = SystemClock.uptimeMillis()
+        val deadline = start + WINDOW_TIMEOUT_MS
+        var reopened = false
         while (SystemClock.uptimeMillis() < deadline) {
-            if (rootInActiveWindow?.packageName?.toString() in SETTINGS_PACKAGES) return true
+            if (settingsWindows().isNotEmpty()) return true
+            // One more start at the halfway mark. A launch that lands mid-transition (the unlock
+            // animation, the shade closing) can be swallowed, and a second start is harmless when
+            // the first one is merely slow — CLEAR_TOP brings back the same activity.
+            if (!reopened && SystemClock.uptimeMillis() - start >= WINDOW_TIMEOUT_MS / 2) {
+                reopened = true
+                openSimManager()
+            }
             Thread.sleep(POLL_MS)
         }
         return false
     }
+
+    /** Start the SIM manager, returning the error if the start itself threw. */
+    private fun openSimManager(): Throwable? = runCatching {
+        startActivity(
+            Intent(SIM_SETTINGS_ACTION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        )
+    }.exceptionOrNull()
+
+    /**
+     * Every window the SIM manager's packages own, topmost first — the picker popup above the
+     * manager screen.
+     *
+     * This, not `rootInActiveWindow`, is what every lookup reads. "Active" is whichever window the
+     * system last credited with input or accessibility focus, and that is not reliably the activity
+     * we just started: in one logged failure the usage events show the SIM manager resumed and
+     * stayed up until the owner swiped it away, while the switcher polled for 15 s and reported
+     * it "never came to the foreground" — and its two back presses closed nothing, so focus was
+     * never on it. Most switch failures in an 18-day trial were that message.
+     * Accessibility actions are delivered to a view directly, so the window needs no focus to be
+     * driven.
+     *
+     * packageNames in the service config still applies: any other app's window comes back with a
+     * null root and is dropped here, so this widens nothing.
+     */
+    private fun settingsWindows(): List<AccessibilityWindowInfo> =
+        runCatching { windows }.getOrNull().orEmpty()
+            .filter { it.root?.packageName?.toString() in SETTINGS_PACKAGES }
+            .sortedByDescending { it.layer }
+
+    /**
+     * The window layout, for failure messages only: each window's type, whether it is the SIM
+     * manager's, and which holds active/focus. Other apps' windows are named only as "other" — the
+     * service is scoped not to read them, and a failure log is no reason to start.
+     */
+    private fun describeWindows(): String =
+        runCatching { windows }.getOrNull().orEmpty().joinToString(", ") { w ->
+            val owner = w.root?.packageName?.toString()?.takeIf { it in SETTINGS_PACKAGES } ?: "other"
+            val type = when (w.type) {
+                AccessibilityWindowInfo.TYPE_APPLICATION -> "app"
+                AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "ime"
+                AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+                AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "a11y"
+                AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "divider"
+                else -> "type${w.type}"
+            }
+            "$type/$owner" + (if (w.isActive) "*active" else "") + (if (w.isFocused) "*focused" else "")
+        }.ifEmpty { "none reported" }
 
     /**
      * Wait for the SIM list to render before reading it.
@@ -333,11 +385,15 @@ class SwitchAccessibilityService : AccessibilityService() {
             .map { it.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) }
             .any { it }
 
-    /** Every node in the active window, breadth-first. */
+    /**
+     * Every node in the SIM manager's windows, topmost window first, breadth-first within each.
+     * See [settingsWindows] for why this is not `rootInActiveWindow`.
+     */
     private fun nodes(): List<AccessibilityNodeInfo> {
-        val root = rootInActiveWindow ?: return emptyList()
+        val roots = settingsWindows().mapNotNull { it.root }
+        if (roots.isEmpty()) return emptyList()
         val out = mutableListOf<AccessibilityNodeInfo>()
-        val queue = ArrayDeque(listOf(root))
+        val queue = ArrayDeque(roots)
         while (queue.isNotEmpty() && out.size < MAX_NODES) {
             val node = queue.removeFirst()
             out += node
@@ -356,17 +412,30 @@ class SwitchAccessibilityService : AccessibilityService() {
     /**
      * Leave Settings however the attempt ended.
      *
-     * Two backs: one dismisses the picker if it is still open, one closes the SIM manager. Backing
-     * out of an already-closed screen is harmless, so this stays unconditional rather than trying
-     * to track how far the flow got.
+     * A global back goes to whichever window has focus, which is not necessarily ours — the logged
+     * failure described at [settingsWindows] left the SIM manager on screen after both backs. So
+     * back is pressed only while a SIM-manager window is the focused one; otherwise the manager's
+     * own "Navigate up" button is clicked, which needs no focus. If neither applies the screen is
+     * left for the user rather than sending a back into whatever app they are in.
      */
     private fun leaveSettings() {
         runCatching {
-            repeat(2) {
-                performGlobalAction(GLOBAL_ACTION_BACK)
+            repeat(LEAVE_ATTEMPTS) {
+                val top = settingsWindows().firstOrNull() ?: return
+                when {
+                    top.isFocused || top.isActive -> performGlobalAction(GLOBAL_ACTION_BACK)
+                    !clickNavigateUp() -> return
+                }
                 Thread.sleep(SETTLE_MS)
             }
         }
+    }
+
+    private fun clickNavigateUp(): Boolean {
+        val up = nodes().firstOrNull {
+            it.contentDescription?.toString()?.trim()?.lowercase() in NAVIGATE_UP_LABELS
+        } ?: return false
+        return tap(up)
     }
 
     companion object {
@@ -405,6 +474,8 @@ class SwitchAccessibilityService : AccessibilityService() {
         )
         private const val VERIFY_TIMEOUT_MS = 8_000L
         private const val ANCESTOR_DEPTH = 6
+        private const val LEAVE_ATTEMPTS = 3
+        private val NAVIGATE_UP_LABELS = setOf("navigate up", "back")
         private const val MAX_NODES = 600
     }
 }

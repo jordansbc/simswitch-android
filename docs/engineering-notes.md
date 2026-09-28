@@ -236,3 +236,38 @@ screen taps. Source in [`tools/ProbeMain.java`](../tools/ProbeMain.java).
 
 Resolve methods **by name** via reflection, never `service call isub <transaction>`: transaction
 codes differ per build, and a wrong index on a live phone could hit `setDefaultVoiceSubId` instead.
+
+## "The SIM manager never came to the foreground" — usually it did
+
+Most switch failures in an 18-day trial carried this message, yet the device's usage events showed
+the SIM manager resuming on time and staying on screen until the user dismissed it. The switcher was
+polling `rootInActiveWindow`, and "active" is whichever window last held input or accessibility
+focus — not reliably the activity just started. Its closing back presses went to that other window
+too, so they left the SIM manager open.
+
+All lookups now walk `getWindows()` (the config already sets `flagRetrieveInteractiveWindows`),
+keeping only windows whose root belongs to the SIM-manager packages — `packageNames` still makes
+every other app's root null, so nothing is widened. Accessibility actions are delivered to the view
+directly, so the window needs no focus to be driven. The start is retried once at the halfway mark,
+a failure records the window layout (other apps named only as "other"), and back is pressed only
+while a SIM-manager window has focus; otherwise the manager's own "Navigate up" is clicked.
+
+Debug builds add a probe for exercising the full path without changing anything — a switch to the
+SIM that already holds data:
+
+```
+adb shell am broadcast -n com.simswitch/.debug.SwitchProbeReceiver [--ei sub <id>]
+adb logcat -s SwitchProbe
+```
+
+It is guarded by the DUMP permission, which the shell holds and ordinary apps cannot.
+
+## Android's own auto data switch covers the no-service case
+
+On Android 14+ `AutoDataSwitchController` (visible in `dumpsys activity service com.android.phone`)
+temporarily moves data to the other SIM when the default one is not usable — after a 10 s stability
+check with a validation ping — and moves it back once the default recovers. It runs with the screen
+off, which an accessibility-driven switch cannot. Its performance-based mode (switch on a better
+signal score) is governed by a framework resource and was disabled on the test device. Note that the
+default data subscription does not change during its temporary switch, so an app attributing
+throughput by DDS will file that traffic under the wrong SIM.
