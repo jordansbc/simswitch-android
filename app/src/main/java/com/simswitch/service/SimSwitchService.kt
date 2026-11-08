@@ -29,6 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -83,18 +84,64 @@ class SimSwitchService : Service() {
         scorer = ScoreEngine(repo)
         val monitor = Sim.monitor(this)
 
-        monitor.start()
-        places.start()
-        throughput.reset()
-
         notifier = scope.launch {
-            monitor.signals.collectLatest { signals ->
-                notificationManager().notify(NOTIFICATION_ID, buildNotification(summarize(signals)))
+            // Driven by both flows, so a pause can never be overwritten by a late signal update.
+            kotlinx.coroutines.flow.combine(monitor.signals, pausedFlow) { signals, isPaused ->
+                if (isPaused) PAUSED_TEXT else summarize(signals)
+            }.collectLatest { text ->
+                notificationManager().notify(NOTIFICATION_ID, buildNotification(text))
             }
         }
 
+        applySimMode()
+        subsListener = object : android.telephony.SubscriptionManager.OnSubscriptionsChangedListener() {
+            override fun onSubscriptionsChanged() { applySimMode() }
+        }
+        runCatching {
+            getSystemService(android.telephony.SubscriptionManager::class.java)
+                ?.addOnSubscriptionsChangedListener(mainExecutor, subsListener!!)
+        }
+
         recorder = scope.launch { recordLoop() }
-        unlockWatcher = scope.launch { unlockWatchLoop() }
+    }
+
+    /** True while fewer than two SIMs are on: radios, location and the unlock poll are all off. */
+    private val pausedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+    private var paused: Boolean
+        get() = pausedFlow.value
+        set(v) { pausedFlow.value = v }
+    private var activeIds: Set<Int>? = null
+    private var subsListener: android.telephony.SubscriptionManager.OnSubscriptionsChangedListener? = null
+
+    /**
+     * With one SIM turned off there is nothing to choose between, so everything that costs battery
+     * stops: the per-SIM telephony callbacks, location updates and the 1-second unlock poll. Only
+     * the subscription listener (and a 10-minute backstop check in [recordLoop]) stays, so turning
+     * the second SIM back on resumes everything without opening the app.
+     */
+    @Synchronized
+    private fun applySimMode() {
+        val ids = Sim.monitor(this).activeSubIds()
+        if (ids == activeIds) return
+        activeIds = ids
+        val monitor = Sim.monitor(this)
+
+        if (ids.size >= 2) {
+            android.util.Log.i(TAG, "two SIMs active ($ids) — monitoring")
+            paused = false
+            monitor.start()
+            places.start()
+            throughput.reset()
+            discardNextThroughput = true
+            if (unlockWatcher?.isActive != true) unlockWatcher = scope.launch { unlockWatchLoop() }
+        } else {
+            android.util.Log.i(TAG, "only ${ids.size} SIM active — pausing to save battery")
+            paused = true
+            unlockWatcher?.cancel()
+            unlockWatcher = null
+            places.stop()
+            monitor.clear()
+        }
     }
 
     /**
@@ -182,7 +229,18 @@ class SimSwitchService : Service() {
     private suspend fun recordLoop() {
         var sinceLastPrune = 0
         while (true) {
+            if (paused) {
+                // Sleep until the SIM listener resumes us, or 10 minutes as a backstop for a
+                // missed callback. Must wake on resume — a plain delay left the loop asleep for up
+                // to 10 minutes after the second SIM came back.
+                kotlinx.coroutines.withTimeoutOrNull(PAUSED_CHECK_MS) {
+                    pausedFlow.first { !it }
+                }
+                applySimMode()
+                continue
+            }
             delay(WINDOW_MS)
+            if (paused) continue
 
             // The DDS can move without us: the owner flipping it in Settings, or a carrier change.
             // Re-read it every window so throughput lands on the line that actually carried it.
@@ -343,6 +401,12 @@ class SimSwitchService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        subsListener?.let { l ->
+            runCatching {
+                getSystemService(android.telephony.SubscriptionManager::class.java)
+                    ?.removeOnSubscriptionsChangedListener(l)
+            }
+        }
         unlockWatcher?.cancel()
         notifier?.cancel()
         recorder?.cancel()
@@ -372,7 +436,11 @@ class SimSwitchService : Service() {
             this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
         )
         val armed = Arming.isArmed(this)
-        val title = if (armed) "SimSwitch — active" else "SimSwitch — watching only"
+        val title = when {
+            paused -> "SimSwitch — paused"
+            armed -> "SimSwitch — active"
+            else -> "SimSwitch — watching only"
+        }
         val body = lastSwitch?.let { "$text\nlast switch: $it" } ?: text
 
         return Notification.Builder(this, CHANNEL_ID)
@@ -403,6 +471,10 @@ class SimSwitchService : Service() {
 
         /** 20s: fast enough to catch a dead spot while driving, slow enough to be cheap. */
         private const val WINDOW_MS = 20_000L
+
+        /** While paused on one SIM, how often to double-check that it's still one SIM. */
+        private const val PAUSED_CHECK_MS = 10 * 60_000L
+        private const val PAUSED_TEXT = "Paused — only one SIM is on"
 
         /** Shared with the repair migration so ingest and repair cannot disagree. */
         private const val MAX_PLAUSIBLE_KBPS = SimSwitchDb.MAX_PLAUSIBLE_KBPS

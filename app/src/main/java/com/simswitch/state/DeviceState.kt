@@ -29,6 +29,14 @@ class DeviceState(private val context: Context) {
         /** Hotspot clients would all drop at once. */
         TETHERING,
 
+        /**
+         * Connected to Wi-Fi. The owner's rule: the data SIM never changes while on
+         * Wi-Fi — the mobile link isn't carrying anything, so there is nothing to gain, and the
+         * SIM manager popping up at home was the cost. Not overridable by urgency either: with
+         * Wi-Fi up, a dead SIM is not stranding any traffic.
+         */
+        ON_WIFI,
+
         /** Screen on and real traffic flowing — a switch here would be felt. */
         ACTIVE_DATA,
 
@@ -69,12 +77,12 @@ class DeviceState(private val context: Context) {
             get() = when (blocker) {
                 Blocker.CALL -> "call in progress"
                 Blocker.TETHERING -> "hotspot active"
+                Blocker.ON_WIFI -> "on Wi-Fi"
                 Blocker.ACTIVE_DATA -> "screen on, using data (%.0f kbps)".format(recentKbps)
                 Blocker.MEDIA_PLAYING -> "screen on, media playing"
                 Blocker.APP_IN_USE -> "in use (${foregroundApp ?: "an app"})"
                 null -> when {
                     !screenOn -> "screen off"
-                    onWifi -> "on Wi-Fi, mobile idle"
                     else -> "screen on but idle"
                 }
             }
@@ -153,8 +161,24 @@ class DeviceState(private val context: Context) {
         return cm.getNetworkCapabilities(cm.activeNetwork ?: return null)
     }
 
-    private fun isOnWifi(): Boolean =
-        activeCaps()?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+    /**
+     * Any connected Wi-Fi network, not just the active one. `activeNetwork` is the VPN when a VPN
+     * is up, and the owner's VPN doesn't reliably advertise its underlying transport — so asking only
+     * the active network would read "not on Wi-Fi" at home behind the VPN and let a switch through.
+     */
+    @Suppress("DEPRECATION")
+    private fun isOnWifi(): Boolean {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
+        if (activeCaps()?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) return true
+        return runCatching {
+            cm.allNetworks.any { n ->
+                cm.getNetworkCapabilities(n)?.let {
+                    it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                        it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                } == true
+            }
+        }.getOrDefault(false)
+    }
 
     private fun isVpnActive(): Boolean = activeCaps()?.let {
         it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ||
@@ -214,16 +238,13 @@ class DeviceState(private val context: Context) {
         ): Blocker? = when {
             inCall -> Blocker.CALL
             tethering -> Blocker.TETHERING
+            // Ahead of screen-off on purpose: on Wi-Fi the SIM never changes, asleep or not.
+            onWifi -> Blocker.ON_WIFI
             // Screen off is the ideal window: nobody is looking and nothing is interactive.
             !screenOn -> null
-            // Ahead of the Wi-Fi bypass on purpose. That bypass reasons about the *link* being
-            // idle, which is true and irrelevant: the switch is no longer invisible, so an app in
-            // front is disturbed whether or not it is moving bytes. Being on Wi-Fi is exactly when
-            // Maps looks idle, which is how it kept getting interrupted.
+            // The switch is not invisible — it opens the SIM manager — so an app in front is
+            // disturbed whether or not it is moving bytes.
             !foregroundQuiet -> Blocker.APP_IN_USE
-            // On Wi-Fi the mobile link is idle, so moving it costs nothing — and it leaves the
-            // phone already on the better SIM for the moment it walks out of Wi-Fi range.
-            onWifi -> null
             kbps > BUSY_KBPS -> Blocker.ACTIVE_DATA
             mediaActive -> Blocker.MEDIA_PLAYING
             else -> null

@@ -35,9 +35,26 @@ class SignalMonitor(private val context: Context) {
     /** Last DDS we published, so [refreshDataSub] can report a change rather than just applying it. */
     private var lastKnownDataSub = SubscriptionManager.INVALID_SUBSCRIPTION_ID
 
+    /** Sub IDs of the SIMs that are switched on right now. */
+    @SuppressLint("MissingPermission")
+    fun activeSubIds(): Set<Int> {
+        val subs = context.getSystemService(SubscriptionManager::class.java) ?: return emptySet()
+        return runCatching {
+            subs.activeSubscriptionInfoList.orEmpty().map { it.subscriptionId }.toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    /** Stop listening and forget every SIM — used while only one SIM is on. */
+    fun clear() {
+        stop()
+        _signals.value = emptyMap()
+    }
+
     @SuppressLint("MissingPermission")
     fun start() {
         stop()
+        // Rebuilt from scratch: a SIM that was turned off must not linger with stale readings.
+        _signals.value = emptyMap()
         val subs = context.getSystemService(SubscriptionManager::class.java) ?: return
         val tm = context.getSystemService(TelephonyManager::class.java) ?: return
         val dataSub = SubscriptionManager.getDefaultDataSubscriptionId()
@@ -81,11 +98,32 @@ class SignalMonitor(private val context: Context) {
      * @return true if the data subscription changed since the last check.
      */
     fun refreshDataSub(): Boolean {
+        refreshPlaceholderNames()
         val dataSub = SubscriptionManager.getDefaultDataSubscriptionId()
         if (dataSub == lastKnownDataSub) return false
         lastKnownDataSub = dataSub
         _signals.update { map -> map.mapValues { (id, s) -> s.copy(isDataSub = id == dataSub) } }
         return true
+    }
+
+    /**
+     * A SIM that has just been switched on can report a blank carrier name for a few seconds,
+     * which [start] records as "sub N". Fill in the real name once it shows up.
+     */
+    @SuppressLint("MissingPermission")
+    private fun refreshPlaceholderNames() {
+        if (_signals.value.values.none { it.carrier.startsWith("sub ") }) return
+        val subs = context.getSystemService(SubscriptionManager::class.java) ?: return
+        val names = runCatching {
+            subs.activeSubscriptionInfoList.orEmpty()
+                .associate { it.subscriptionId to it.carrierName?.toString().orEmpty() }
+        }.getOrDefault(emptyMap())
+        _signals.update { map ->
+            map.mapValues { (id, s) ->
+                val name = names[id]
+                if (s.carrier.startsWith("sub ") && !name.isNullOrBlank()) s.copy(carrier = name) else s
+            }
+        }
     }
 
     private inner class SubCallback(private val subId: Int) :

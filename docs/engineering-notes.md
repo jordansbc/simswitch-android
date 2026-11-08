@@ -271,3 +271,14 @@ off, which an accessibility-driven switch cannot. Its performance-based mode (sw
 signal score) is governed by a framework resource and was disabled on the test device. Note that the
 default data subscription does not change during its temporary switch, so an app attributing
 throughput by DDS will file that traffic under the wrong SIM.
+
+## Pausing on one SIM: wake the loop, don't just sleep it
+
+A foreground service that idles while only one SIM is on needs its main loop to *wake* on resume.
+The first version slept the loop with a plain 10-minute `delay` while paused; the subscription
+listener resumed the radios at once, but no evaluation ran for up to 10 minutes. Wait on the paused
+state itself (`withTimeoutOrNull(backstop) { pausedFlow.first { !it } }`) instead.
+
+Two smaller things seen on device: `activeSubscriptionInfoList` must be re-read on change (read once
+at start, a SIM that was turned off lingers with stale readings), and a SIM that was just switched on
+can report a blank `carrierName` for a few seconds.

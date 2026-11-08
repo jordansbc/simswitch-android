@@ -85,10 +85,17 @@ Never mid-call — cellular or VoIP. VoIP is detected via `AudioManager.mode` **
 ~50–100 kbps and would read as idle. Never while tethering. Never while the screen is on and data is
 actually flowing, or media is playing, or a **protected app** is in front.
 
-Screen-off and on-Wi-Fi are both *safe* windows — nobody notices a reconnect they can't see.
+**Never while on Wi-Fi**, screen on or off: the mobile link isn't carrying anything, so there is
+nothing to gain, and the SIM manager popping up at home is the only effect. Wi-Fi is detected across
+*all* connected networks, because `activeNetwork` is the VPN when one is up. Screen-off (off Wi-Fi)
+is the *safe* window — nobody notices a reconnect they can't see.
+
+With **only one SIM turned on** there is nothing to choose between, so the service pauses: telephony
+callbacks, location updates and the unlock poll all stop, and a subscription listener resumes them
+when the second SIM comes back.
 
 An **urgent** switch (the current SIM has no service) overrides the protected-app hold, but never
-the call interlock.
+the call or Wi-Fi interlocks.
 
 The rules are pure functions because some combinations can't be staged on the device at all —
 Samsung blocks toggling Wi-Fi from adb (`svc wifi` and `cmd wifi set-wifi-enabled` both no-op).

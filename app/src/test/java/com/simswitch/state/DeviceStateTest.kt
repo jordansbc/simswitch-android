@@ -102,11 +102,11 @@ class DeviceStateTest {
     }
 
     @Test
-    fun `wifi is a safe window regardless of screen`() {
-        // On Wi-Fi the mobile link carries nothing, so a switch is invisible — and it means the
-        // phone is already on the better SIM when it leaves the house.
-        assertNull(blocker(screenOn = true, onWifi = true))
-        assertNull(blocker(screenOn = true, onWifi = true, mediaActive = true))
+    fun `wifi always blocks, screen on or off`() {
+        // The owner's rule: never change the data SIM while on Wi-Fi.
+        assertEquals(Blocker.ON_WIFI, blocker(screenOn = true, onWifi = true))
+        assertEquals(Blocker.ON_WIFI, blocker(screenOn = false, onWifi = true))
+        assertEquals(Blocker.ON_WIFI, blocker(screenOn = true, onWifi = true, mediaActive = true))
     }
 
     @Test
@@ -136,12 +136,9 @@ class DeviceStateTest {
     }
 
     @Test
-    fun `an app in the foreground blocks even on wifi`() {
-        // Wi-Fi is the case that made this worst: the mobile link is idle by definition, so the
-        // Wi-Fi bypass called it safe while the owner was reading something. Attention is the thing
-        // being protected here, not the connection.
+    fun `wifi blocks even when an app is in front`() {
         assertEquals(
-            Blocker.APP_IN_USE,
+            Blocker.ON_WIFI,
             blocker(screenOn = true, onWifi = true, foregroundQuiet = false),
         )
     }
